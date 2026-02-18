@@ -74,7 +74,8 @@ Upon receiving a user via an ACT-enabled link, the Local Agent's server initiate
       "cuisine": "Italian" 
       } 
     },
-  "consent_token": "ct_v1_signed_9921", 
+  "consent_token": "ct_v1_signed_9921",
+  "feedback_token": "ft_hmac_abc123def456"
 }
 ```
 
@@ -85,6 +86,7 @@ Upon receiving a user via an ACT-enabled link, the Local Agent's server initiate
 | constraints | Object | Hard requirements that must be met (e.g., allergies, size, budget). |
 | payload | Object | **Schema.org** compatible object, representing the constraints and preferences. |
 | consent\_token | String | A cryptographic proof that the user authorized this specific data transfer. |
+| feedback\_token | String | A session-scoped token the Local Agent MUST include in all Feedback Loop requests (see §5.3). |
 
 ## 5 The Feedback Loop
 
@@ -118,6 +120,21 @@ The Local Agent MUST use the `act_callback_url` provided in the initial handoff.
 | intent\_match | Boolean | **True** if the Global Agent's context was accurate to the site's capability. **False** if the site couldn't fulfill the specific constraints (e.g., "We don't sell size 15"). |
 | payload | Object | **Schema.org** compatible object, giving more details about the engagement / conversion |
 
+### 5.3 Feedback Authentication
+
+The Local Agent MUST include the `feedback_token` (received during Context Retrieval, §4) in the `Authorization` header of every feedback POST:
+
+```
+Authorization: Bearer ft_hmac_abc123def456
+```
+
+The Global Agent MUST reject any feedback request where:
+* The `feedback_token` is missing or invalid.
+* The `feedback_token` does not match the `act_session_id` in the request body.
+* The session has expired.
+
+This ensures that only the Local Agent that successfully retrieved the context can submit feedback, preventing spoofed conversion or engagement signals from poisoning the Global Agent's routing and reputation data.
+
 ## 6 Privacy & Consent
 
 ### 6.1 The Consent Orchestrator
@@ -140,10 +157,31 @@ ACT replaces the "guessing" model of traditional web tracking with explicit, con
 
 ### 6.3 Security & Verification
 
+ACT requires bidirectional trust: the Local Agent must trust the context it receives, and the Global Agent must trust the feedback it receives.
+
+#### Context Authenticity (Global → Local)
+
 To prevent malicious actors from spoofing user intent or preferences, Local Agents MUST verify the source of the context.
 
 * **Trust Root**: Global Agents shall publish their public keys at a standardized location: `https://[origin]/.well-known/act-pubkey.json`.  
 * **Verification**: The Context Payload response SHOULD be signed (e.g., using JWS), allowing the Local Agent to confirm that the intent data is authentic and originates from the stated Global Agent. This ensures that constraints (like food allergies) cannot be tampered with by a man-in-the-middle.
+
+#### Feedback Authenticity (Local → Global)
+
+To prevent spoofed feedback (fake conversions, poisoned reputation scores), the Global Agent MUST verify that feedback originates from the Local Agent that received the context.
+
+* **Feedback Token**: The Global Agent issues a cryptographically signed, session-scoped `feedback_token` as part of the Context Response (§4). Only the entity that successfully pulled the context possesses this token.
+* **Verification**: The Global Agent validates the token signature and confirms it is bound to the `act_session_id` before accepting any feedback.
+* **Why not Local Agent PKI?**: Requiring every website to publish signing keys would raise the adoption barrier. The feedback token bootstraps trust from the existing handshake -- no additional infrastructure is needed from the Local Agent side.
+
+### 6.4 Identity & User IDs
+
+ACT intentionally excludes user identifiers from the protocol. The context payload carries **intent**, not **identity**.
+
+* **No cross-site tracking**: A protocol-level user ID would allow Local Agents to correlate users across sites, enabling the same cross-site profiling that ACT is designed to avoid.
+* **Ephemeral sessions**: The `act_session_id` is short-lived and single-use. Adding a persistent user ID would defeat this property.
+* **Existing login flows**: If a Local Agent needs to identify a returning customer, the user logs in through the site's normal authentication -- separate from ACT.
+* **Scoped opt-in data**: When the user explicitly wants to share identity-adjacent information (e.g., a loyalty program number), this can be included as an optional field in `preferences` with the user's consent, rather than as a protocol-level identifier.
 
 ## 7 Design Alternatives & Decisions
 
@@ -265,7 +303,8 @@ JSON
     "vibe": "boutique",
     "location_priority": "central"
   },
-  "consent_token": "sig_9901_verified"
+  "consent_token": "sig_9901_verified",
+  "feedback_token": "ft_hmac_paris442_x7k9"
 }
 ```
 
@@ -277,9 +316,12 @@ The user successfully completes the booking. The Local Agent notifies the Global
 
 **Request to Global Agent:**
 
-JSON
-
 ```
+POST https://api.agent.ai/act
+Authorization: Bearer ft_hmac_paris442_x7k9
+```
+
+```json
 {
   "act_session_id": "paris-442",
   "action": "conversion",
