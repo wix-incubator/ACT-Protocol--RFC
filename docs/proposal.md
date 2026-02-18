@@ -1,4 +1,4 @@
-# Agent Context Transfer (ACT) Protocol v0.3
+# Agent Context Transfer (ACT) Protocol v0.4
 
 ## 1 Introduction
 
@@ -10,7 +10,7 @@ The goal of ACT is to eliminate the "cold start" problem when a user clicks a li
 
 * **Global Agent:** The initiating AI platform (e.g., Gemini, ChatGPT, Claude).  
 * **Local Agent:** The destination AI or automated service residing on a specific web domain.  
-* **ACT Session:** A temporary, conversation-scoped link between the two agents.  
+* **ACT Session:** A temporary, conversation-scoped link between the two agents. Progresses through three phases: **Created** (link generated, awaiting context pull), **Active** (context pulled, feedback accepted), and **Closed** (expired or revoked).  
 * **Context Pull:** The process by which a Local Agent fetches structured data from the Global Agent.
 
 ## 3 The Handoff (URL Parameters)
@@ -74,7 +74,7 @@ Upon receiving a user via an ACT-enabled link, the Local Agent's server initiate
       "cuisine": "Italian" 
       } 
     },
-  "consent_token": "ct_v1_signed_9921",
+  "consent_token": "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJhZ2VudC5nb29nbGUuY29tIiwic3ViIjoic2Vzc185ODc2NWFiYyIsImlhdCI6MTc1MDAwMDAwMCwiY2F0ZWdvcmllcyI6WyJkaWV0YXJ5IiwiYnVkZ2V0Il0sImNvbnNlbnRfdHlwZSI6ImV4cGxpY2l0In0.signature",
   "feedback_token": "ft_hmac_abc123def456"
 }
 ```
@@ -85,9 +85,53 @@ Upon receiving a user via an ACT-enabled link, the Local Agent's server initiate
 | preferences | Object | Key-value pairs of user desires (e.g., style, brand, urgency). |
 | constraints | Object | Hard requirements that must be met (e.g., allergies, size, budget). |
 | payload | Object | **Schema.org** compatible object, representing the constraints and preferences. |
-| consent\_token | String | A cryptographic proof that the user authorized this specific data transfer. |
+| consent\_token | String (JWT) | A JWS-signed token certifying the user consented to share the included data categories (see §6.1). |
 | feedback\_token | String | A session-scoped token the Local Agent MUST include in all Feedback Loop requests (see §5.3). |
 | identity\_hints | Object | (Optional) SSO hints for seamless authentication when an existing SSO relationship exists (see §6.4). |
+
+### 4.2 Session Lifecycle
+
+An ACT session progresses through three phases:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Created: Global Agent generates link
+    Created --> Active: Local Agent pulls context
+    Created --> Expired: Handoff window elapses
+    Active --> Closed: Session TTL expires
+    Active --> Closed: Global Agent revokes
+    Closed --> [*]
+```
+
+| Phase | Duration | Behavior |
+| :---- | :---- | :---- |
+| **Created** | Link generated → context pulled (or handoff window expires) | Only the context GET is accepted. Feedback POSTs are rejected. |
+| **Active** | Context pulled → session TTL or explicit revocation | Context GET returns cached response. Feedback POSTs are accepted. |
+| **Closed** | Terminal | All requests return `410 Gone`. |
+
+**Recommended TTLs:**
+
+| Parameter | Value | Rationale |
+| :---- | :---- | :---- |
+| Handoff window | 5 minutes | User should land on the site shortly after clicking the link. |
+| Session TTL | 60 minutes | Covers browsing, comparison, and conversion. |
+
+Global Agents MAY adjust these values. Use cases vary -- a quick food order needs less time than a hotel booking.
+
+**Termination:**
+* **Timeout**: The session auto-expires after the session TTL.
+* **Explicit revocation**: The Global Agent can close a session at any time (e.g., the user ends the conversation). Subsequent requests receive `410 Gone`.
+* **Graceful degradation**: When a Local Agent receives `410 Gone` on a feedback POST, it SHOULD stop sending feedback. The user's browsing experience is unaffected -- only the agent-to-agent link is severed.
+
+**Response codes:**
+
+| Scenario | HTTP Status |
+| :---- | :---- |
+| Valid context pull | `200 OK` |
+| Valid feedback POST | `200 OK` |
+| Unknown or invalid session ID | `404 Not Found` |
+| Session expired or revoked | `410 Gone` |
+| Invalid or missing feedback token | `401 Unauthorized` |
 
 ## 5 The Feedback Loop
 
@@ -146,7 +190,37 @@ The Global Agent serves as the primary **Consent Orchestrator** for the user jou
 * **Execution**: Before releasing an Intent Package via the callback URL, the Global Agent must ensure appropriate consent.  
   * **Implicit Intent:** General parameters (e.g., "blue sneakers") are consented to by the user's action of clicking the link.  
   * **Explicit Sensitive Data:** For constraints such as medical allergies or precise location, the Global Agent must trigger a UI prompt: *"Share your allergy profile with \[Local Agent\]?"*  
-* **The Token as Certification**: When a Local Agent receives a context response, the existence of that data serves as a cryptographic certification that the Consent Orchestrator has verified the user's permission to share that specific information for that specific session.
+* **The Token as Certification**: When a Local Agent receives a context response, the `consent_token` serves as cryptographic certification that the Consent Orchestrator has verified the user's permission to share that specific information for that specific session.
+
+#### Consent Token Structure
+
+The `consent_token` is a **JWS-signed JWT** issued by the Global Agent. It is not round-tripped -- it flows one direction (Global Agent → Local Agent) as proof that travels with the data.
+
+**JWT Claims:**
+
+| Claim         | Type     | Description |
+| :----         | :----    | :---- |
+| iss           | String   | Global Agent origin (matches `act_origin`). |
+| sub           | String   | The `act_session_id` this consent is bound to. |
+| iat           | Number   | Issued-at timestamp (Unix epoch). |
+| categories    | String[] | Data categories the user consented to share (e.g., `["dietary", "budget", "accessibility"]`). |
+| consent\_type | String   | `implicit` (user clicked the link) or `explicit` (user was prompted). |
+
+**Example decoded payload:**
+
+```json
+{
+  "iss": "agent.google.com",
+  "sub": "sess_98765abc",
+  "iat": 1750000000,
+  "categories": ["dietary", "budget"],
+  "consent_type": "explicit"
+}
+```
+
+**Verification**: The Local Agent validates the JWS signature using the Global Agent's public key from `https://[act_origin]/.well-known/act-pubkey.json` (same keys used for context verification in §6.3). Keys can be cached.
+
+**Storage**: The Local Agent MAY store the signed `consent_token` as a compliance receipt, demonstrating that data was received with verified user consent. The token is self-contained and can be verified offline at any later point.
 
 ### 6.2 The "Cookie-Free" Evolution
 
