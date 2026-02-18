@@ -352,15 +352,17 @@ sequenceDiagram
     rect rgb(240, 248, 255)
     Note right of LocalAgent: [Step 1] Context Retrieval (Pull)
     LocalAgent->>GlobalAgent: GET https://api.agent.ai/act?session_id=paris-442
-    GlobalAgent-->>LocalAgent: Return JSON (Intent + Schema.org + Constraints)
+    GlobalAgent-->>LocalAgent: JSON (Intent + Constraints + consent_token + feedback_token)
+    Note right of LocalAgent: Session: Created → Active
     end
 
+    Note right of LocalAgent: Verify consent_token JWT signature
     LocalAgent->>Browser: Render page pre-filled with Suite, <br>Dates, and Accessibility filters.
     User->>Browser: Clicks "Confirm Reservation"
 
     rect rgb(245, 245, 245)
     Note right of LocalAgent: [Step 2] Feedback Loop (Push)
-    LocalAgent->>GlobalAgent: POST https://api.agent.ai/act (Order Success)
+    LocalAgent->>GlobalAgent: POST https://api.agent.ai/act<br>Authorization: Bearer feedback_token
     end
     
     LocalAgent->>Browser: Show Confirmation Page
@@ -411,10 +413,24 @@ JSON
     "vibe": "boutique",
     "location_priority": "central"
   },
-  "consent_token": "sig_9901_verified",
+  "consent_token": "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJhcGkuYWdlbnQuYWkiLCJzdWIiOiJwYXJpcy00NDIiLCJpYXQiOjE3NTAwMDAwMDAsImNhdGVnb3JpZXMiOlsiYWNjZXNzaWJpbGl0eSIsImJ1ZGdldCIsImxvZGdpbmciXSwiY29uc2VudF90eXBlIjoiZXhwbGljaXQifQ.signature",
   "feedback_token": "ft_hmac_paris442_x7k9"
 }
 ```
+
+The `consent_token` decodes to:
+
+```json
+{
+  "iss": "api.agent.ai",
+  "sub": "paris-442",
+  "iat": 1750000000,
+  "categories": ["accessibility", "budget", "lodging"],
+  "consent_type": "explicit"
+}
+```
+
+The Local Agent verifies the JWT signature against the Global Agent's public key at `https://api.agent.ai/.well-known/act-pubkey.json` and stores the token as a compliance receipt. The `consent_type: "explicit"` indicates the user was prompted before sharing accessibility needs.
 
 ---
 
