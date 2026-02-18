@@ -87,6 +87,7 @@ Upon receiving a user via an ACT-enabled link, the Local Agent's server initiate
 | payload | Object | **Schema.org** compatible object, representing the constraints and preferences. |
 | consent\_token | String | A cryptographic proof that the user authorized this specific data transfer. |
 | feedback\_token | String | A session-scoped token the Local Agent MUST include in all Feedback Loop requests (see §5.3). |
+| identity\_hints | Object | (Optional) SSO hints for seamless authentication when an existing SSO relationship exists (see §6.4). |
 
 ## 5 The Feedback Loop
 
@@ -182,6 +183,39 @@ ACT intentionally excludes user identifiers from the protocol. The context paylo
 * **Ephemeral sessions**: The `act_session_id` is short-lived and single-use. Adding a persistent user ID would defeat this property.
 * **Existing login flows**: If a Local Agent needs to identify a returning customer, the user logs in through the site's normal authentication -- separate from ACT.
 * **Scoped opt-in data**: When the user explicitly wants to share identity-adjacent information (e.g., a loyalty program number), this can be included as an optional field in `preferences` with the user's consent, rather than as a protocol-level identifier.
+
+#### SSO Identity Hints (Optional Extension)
+
+When the Global Agent and Local Agent share an existing SSO relationship, ACT can carry **identity hints** that enable seamless authentication -- without ACT itself becoming an identity protocol. The user MUST explicitly consent to sharing identity (per §6.1, this is "Explicit Sensitive Data").
+
+The Context Response MAY include an optional `identity_hints` object:
+
+```json
+"identity_hints": {
+  "protocol": "oidc",
+  "idp_issuer": "https://accounts.google.com",
+  "login_hint": "opaque_hint_abc123",
+  "id_token_hint": "eyJhbGciOiJSUzI1NiIs..."
+}
+```
+
+| Field           | Type   | Description |
+| :----           | :----  | :---- |
+| protocol        | String | Authentication protocol. Currently only `oidc` is defined. |
+| idp\_issuer     | String | The OIDC Issuer URL of the Identity Provider. |
+| login\_hint     | String | An opaque hint the IDP can use to identify the user. MUST NOT contain plaintext PII. |
+| id\_token\_hint | String | (Optional) A signed OIDC ID Token the Local Agent can use for silent authentication. |
+
+**Configuration A -- Global Agent is the IDP:**
+When the Global Agent provider is the Local Agent's SSO Identity Provider (e.g., user is on Gemini, site uses "Sign in with Google"), the Global Agent can issue an `id_token_hint` directly. The Local Agent passes this to the Global Agent's OIDC authorization endpoint to silently authenticate the user -- no popup or redirect required. This does not create a new tracking vector since the identity relationship already exists on both sides.
+
+**Configuration B -- Shared third-party IDP:**
+When both agents use the same external IDP (e.g., both use "Sign in with Apple"), the Global Agent includes the `idp_issuer` and a `login_hint`. The Local Agent initiates its own OIDC flow with that IDP using the hint. The IDP handles the user mapping internally. Note that OIDC uses **pairwise subject identifiers** -- the same user gets different `sub` values at different relying parties -- so the Global Agent cannot and does not pass a cross-party user ID. ACT carries the hint, the IDP carries the identity.
+
+**Privacy invariants:**
+* ACT never carries a resolved user identity -- only hints for an external IDP to resolve.
+* The Local Agent authenticates the user through its own OIDC flow, not through ACT.
+* If the SSO flow fails or the user declines, the ACT session continues normally without identity -- intent transfer is unaffected.
 
 ## 7 Design Alternatives & Decisions
 
