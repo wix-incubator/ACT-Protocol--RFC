@@ -1,10 +1,12 @@
-# Agent Context Transfer (ACT) Protocol v0.4
+# Agent Context Transfer (ACT) Protocol v0.5
 
 ## 1 Introduction
 
 The **Agent Context Transfer (ACT)** protocol defines a standardized mechanism for a **Global Agent** (e.g., a general-purpose AI assistant) to securely hand off a user’s conversation state, intent, and constraints to a **Local Agent** (e.g., a website-specific AI or service).
 
 The goal of ACT is to eliminate the "cold start" problem when a user clicks a link from an AI assistant to a website, ensuring the website understands exactly what the user is looking for without requiring the user to repeat themselves. In contrast to automation-heavy protocols, ACT is specifically designed to **enhance the human-led browsing experience** by ensuring the website "knows" the nuances of the conversation the user was just having with their Global Agent, allowing for a seamless transition from dialogue to digital storefront or service.
+
+A core design principle is **zero-setup adoption**: any website can participate in ACT without pre-registration, API key exchange, or shared secrets with Global Agents. The protocol relies on public-key infrastructure and short-lived, unguessable session tokens rather than bilateral agreements. This simplicity comes with deliberate trade-offs in caller authentication (see §4.1), which are documented throughout the spec.
 
 ## 2 Terminology
 
@@ -24,11 +26,12 @@ When a Global Agent directs a user to a website, it appends a minimal set of par
 | act\_session\_id | A unique, ephemeral identifier for the conversation. | sess\_98765abc |
 | act\_origin | The identifier/domain of the Global Agent. | agent.google.com |
 | act\_callback\_url | The endpoint where the Local Agent fetches context. | https://api.global-ai.com/v1/act |
+| act\_version | Protocol major version. Absent defaults to `1`. | 1 |
 
 **Example URL:**
 
 ```
-https://italy-eats.com/order?act_session_id=sess_98765abc&act_origin=agent.google.com&act_callback_url=https://api.global-ai.com/v1/act
+https://italy-eats.com/order?act_session_id=sess_98765abc&act_origin=agent.google.com&act_callback_url=https://api.global-ai.com/v1/act&act_version=1
 ```
 
 **Implementation Note:** To protect user privacy, browsers and servers SHOULD NOT log act\_ prefixed parameters in plain-text server access logs.
@@ -42,14 +45,17 @@ Upon page load, the Local Agent initiates a server-to-server GET request to the 
 Upon receiving a user via an ACT-enabled link, the Local Agent's server initiates a **HTTP GET** request to the `act_callback_url`.
 
 * **Discovery**: The Local Agent extracts the `act_session_id` and `act_callback_url` from the URL parameters.  
-* **Authentication**: The Local Agent identifies itself in the request header (e.g., via User-Agent or a domain-specific identifier).  
-* **Authorization**: The Global Agent validates that the `act_session_id` is active, has not expired (short TTL), and was originally intended for the requesting `act_origin`.
+* **Authorization**: The `act_session_id` itself serves as the authorization token. The Global Agent validates that it is active and has not expired (see §4.2 Session Lifecycle).  
+* **Trust model**: Because this is a server-to-server call, the Global Agent cannot cryptographically verify the caller's identity. The protocol relies on the **unguessable-URL pattern**: session IDs MUST be cryptographically random (minimum 128 bits of entropy) and short-lived, making interception or guessing infeasible. Implementations requiring stronger caller authentication MAY layer on mutual TLS or pre-registered API keys.
+
+**Implementation Note:** The Global Agent SHOULD rate-limit requests per session — one successful context pull is expected (allow a small retry window), and only a handful of feedback events per session. This limits the impact of leaked session IDs.
 
 **Example Context Response:**
 
 ```json
 { 
- "intent": "quick italian meal", 
+  "act_session_id": "sess_98765abc",
+  "intent": "quick italian meal", 
   "preferences": { 
     "style": "authentic", 
     "delivery": "express" 
@@ -81,6 +87,7 @@ Upon receiving a user via an ACT-enabled link, the Local Agent's server initiate
 
 | Field | Type | Description |
 | :---- | :---- | :---- |
+| act\_session\_id | String | Echo of the session ID, allowing the Local Agent to confirm the correct context was returned. |
 | intent | String | A concise summary of what the user is trying to achieve. |
 | preferences | Object | Key-value pairs of user desires (e.g., style, brand, urgency). |
 | constraints | Object | Hard requirements that must be met (e.g., allergies, size, budget). |
@@ -88,6 +95,8 @@ Upon receiving a user via an ACT-enabled link, the Local Agent's server initiate
 | consent\_token | String (JWT) | A JWS-signed token certifying the user consented to share the included data categories (see §6.1). |
 | feedback\_token | String | A session-scoped token the Local Agent MUST include in all Feedback Loop requests (see §5.3). |
 | identity\_hints | Object | (Optional) SSO hints for seamless authentication when an existing SSO relationship exists (see §6.4). |
+
+**Note on `payload` vs. `intent`/`preferences`/`constraints`:** The `intent`, `preferences`, and `constraints` fields are human-readable, unstructured summaries. The `payload` is the machine-readable Schema.org representation of the same data. They are complementary — the Local Agent MAY use either or both depending on its capabilities. When both are present, the `payload` is authoritative.
 
 ### 4.2 Session Lifecycle
 
@@ -148,7 +157,7 @@ The Local Agent MUST use the `act_callback_url` provided in the initial handoff.
   "act_session_id": "sess_98765abc", 
   "description": "User found the item, but requested size (11W) is currently out of stock.", 
   "action": "engagement", 
-  "intent_match": "failure", 
+  "intent_match": false, 
   "payload": { 
     "@context": "https://schema.org", 
     "@type": "ItemAvailability", 
@@ -161,7 +170,7 @@ The Local Agent MUST use the `act_callback_url` provided in the initial handoff.
 | :---- | :---- | :---- |
 | act\_session\_id | String | The unique ID provided in the initial handoff. |
 | description | String | Natural language summary for the Global Agent to explain the status to the user. |
-| action | Enum | engagement (user interacting) or conversion (user completed intent). |
+| action | Enum | `engagement` (user interacting), `conversion` (user completed intent), or `abandonment` (user left without completing intent). |
 | intent\_match | Boolean | **True** if the Global Agent's context was accurate to the site's capability. **False** if the site couldn't fulfill the specific constraints (e.g., "We don't sell size 15"). |
 | payload | Object | **Schema.org** compatible object, giving more details about the engagement / conversion |
 
@@ -179,6 +188,22 @@ The Global Agent MUST reject any feedback request where:
 * The session has expired.
 
 This ensures that only the Local Agent that successfully retrieved the context can submit feedback, preventing spoofed conversion or engagement signals from poisoning the Global Agent's routing and reputation data.
+
+### 5.4 Response
+
+The Global Agent SHOULD return `200 OK` with a JSON acknowledgment:
+
+```json
+{ "status": "accepted" }
+```
+
+Error responses follow the status codes defined in §4.2.
+
+### 5.5 Multiple Events
+
+The Local Agent MAY send multiple feedback POSTs during a single session (e.g., an `engagement` event followed by a `conversion`). Each event is independent. The Global Agent SHOULD accept all valid events until the session closes.
+
+Similarly, the Local Agent MAY pull context multiple times during the Active phase (e.g., for retries or multi-page architectures). The Global Agent returns the same cached response.
 
 ## 6 Privacy & Consent
 
@@ -218,7 +243,7 @@ The `consent_token` is a **JWS-signed JWT** issued by the Global Agent. It is no
 }
 ```
 
-**Verification**: The Local Agent validates the JWS signature using the Global Agent's public key from `https://[act_origin]/.well-known/act-pubkey.json` (same keys used for context verification in §6.3). Keys can be cached.
+**Verification**: The Local Agent validates the JWS signature using the Global Agent's public key from `https://[act_origin]/.well-known/act-jwks.json` (same keys used for context verification in §6.3). Keys can be cached.
 
 **Storage**: The Local Agent MAY store the signed `consent_token` as a compliance receipt, demonstrating that data was received with verified user consent. The token is self-contained and can be verified offline at any later point.
 
@@ -238,8 +263,9 @@ ACT requires bidirectional trust: the Local Agent must trust the context it rece
 
 To prevent malicious actors from spoofing user intent or preferences, Local Agents MUST verify the source of the context.
 
-* **Trust Root**: Global Agents shall publish their public keys at a standardized location: `https://[origin]/.well-known/act-pubkey.json`.  
-* **Verification**: The Context Payload response SHOULD be signed (e.g., using JWS), allowing the Local Agent to confirm that the intent data is authentic and originates from the stated Global Agent. This ensures that constraints (like food allergies) cannot be tampered with by a man-in-the-middle.
+* **Trust Root**: Global Agents shall publish their public keys as a **JWK Set** (RFC 7517) at a standardized location: `https://[act_origin]/.well-known/act-jwks.json`. The JWK Set supports key rotation via the `kid` (Key ID) field.  
+* **Signing**: The Global Agent SHOULD sign the Context Response using JWS Compact Serialization. The response body remains clean JSON; the signature is sent in an `ACT-Signature` response header. The header includes the `kid` so the Local Agent knows which key to verify with.  
+* **Verification**: The Local Agent validates the `ACT-Signature` against the Global Agent's public key (fetched from the JWK Set endpoint, cacheable). This confirms that the intent data is authentic and has not been tampered with in transit. This is particularly important for safety-critical constraints (e.g., food allergies, accessibility needs).
 
 #### Feedback Authenticity (Local → Global)
 
@@ -248,6 +274,14 @@ To prevent spoofed feedback (fake conversions, poisoned reputation scores), the 
 * **Feedback Token**: The Global Agent issues a cryptographically signed, session-scoped `feedback_token` as part of the Context Response (§4). Only the entity that successfully pulled the context possesses this token.
 * **Verification**: The Global Agent validates the token signature and confirms it is bound to the `act_session_id` before accepting any feedback.
 * **Why not Local Agent PKI?**: Requiring every website to publish signing keys would raise the adoption barrier. The feedback token bootstraps trust from the existing handshake -- no additional infrastructure is needed from the Local Agent side.
+
+#### Link Integrity
+
+The `act_callback_url` and `act_origin` parameters are visible in the URL. If a man-in-the-middle modifies both to point to a malicious server, the Local Agent would pull context from the attacker and validate against the attacker's keys. This is not ACT-specific -- it is a general link-integrity problem that applies to any URL. Mitigations:
+
+* The Global Agent serves links over HTTPS, preventing in-transit tampering.
+* The user sees the destination domain in the browser address bar (unchanged by ACT parameters).
+* Local Agents SHOULD maintain an allowlist of trusted `act_origin` domains and reject context from unknown origins.
 
 ### 6.4 Identity & User IDs
 
@@ -316,6 +350,10 @@ The ACT protocol occupies a unique space between general web browsing and deep a
 **WebMCP** (and similar Model Context Protocols) essentially treats the website as a "headless tool" for the agent to manipulate directly via automation (RPAs or browser-control layers).
 
 In contrast, **ACT** is about **enhancing the human-led browsing experience** by ensuring the website "knows" what the human and the Global Agent were just discussing.
+
+### Future Considerations
+
+* **ACT Discovery**: A mechanism for Local Agents to advertise ACT support (e.g., `/.well-known/act.json`) would allow Global Agents to prioritize ACT-enabled sites. Currently, ACT degrades gracefully -- non-ACT sites simply ignore the `act_` parameters, so discovery is not required for the protocol to function.
 
 ## 8 Examples
 
@@ -430,7 +468,7 @@ The `consent_token` decodes to:
 }
 ```
 
-The Local Agent verifies the JWT signature against the Global Agent's public key at `https://api.agent.ai/.well-known/act-pubkey.json` and stores the token as a compliance receipt. The `consent_type: "explicit"` indicates the user was prompted before sharing accessibility needs.
+The Local Agent verifies the JWT signature against the Global Agent's public key at `https://api.agent.ai/.well-known/act-jwks.json` and stores the token as a compliance receipt. The `consent_type: "explicit"` indicates the user was prompted before sharing accessibility needs.
 
 ---
 

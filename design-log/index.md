@@ -17,3 +17,9 @@
 | # | Title | Description |
 |---|-------|-------------|
 | 3 | Consent Token & Session Lifecycle | Defines consent_token structure and session lifetime semantics |
+
+## Reviews
+
+| # | Title | Description |
+|---|-------|-------------|
+| 4 | Open Issues (v0.4 Review) | 14 issues: inconsistencies, underspecified areas, missing elements, security edge case |

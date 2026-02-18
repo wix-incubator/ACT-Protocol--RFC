@@ -18,7 +18,7 @@ The protocol uses a **pull model** — the website fetches context server-to-ser
 
 ## Specification
 
-The full proposal is at [`docs/proposal.md`](docs/proposal.md) (currently v0.4).
+The full proposal is at [`docs/proposal.md`](docs/proposal.md) (currently v0.5).
 
 **Key sections:**
 
