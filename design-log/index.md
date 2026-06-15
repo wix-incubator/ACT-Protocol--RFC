@@ -23,3 +23,4 @@
 | # | Title | Description |
 |---|-------|-------------|
 | 4 | Open Issues (v0.4 Review) | 14 issues: inconsistencies, underspecified areas, missing elements, security edge case |
+| 5 | Partner Feedback & v0.7 Changes | External review: URL observation leaks, feedback prompt injection, reverse consent, zero-setup framing |
