@@ -18,7 +18,7 @@ The protocol uses a **pull model** — the website fetches context server-to-ser
 
 ## Specification
 
-The full proposal is at [`docs/proposal.md`](docs/proposal.md) (currently v0.5).
+The full proposal is at [`docs/proposal.md`](docs/proposal.md) (currently v0.7).
 
 **Key sections:**
 
@@ -26,12 +26,18 @@ The full proposal is at [`docs/proposal.md`](docs/proposal.md) (currently v0.5).
 |---|---|
 | §3 | Handoff — URL parameters that start a session |
 | §4 | Context Retrieval — the pull model and session lifecycle |
-| §5 | Feedback Loop — Local Agent reports outcomes back |
-| §6 | Privacy & Consent — consent tokens, security, identity |
+| §5 | Feedback Loop — Local Agent reports outcomes back, with safety and size limits |
+| §6 | Privacy & Consent — bidirectional consent tokens, security, identity |
 
 ## Design Logs
 
 Discussion, trade-off analysis, and rationale for proposal changes live in [`design-log/`](design-log/). See the [index](design-log/index.md) for a catalog.
+
+## Changelog
+
+**v0.7** — Mandatory server-side redirect (§3.1), feedback safety with prompt-injection guidance (§5.6), size limits on feedback (§5.2), bidirectional consent via `feedback_categories` (§6.1), threat model scoping (§4.1), reframed "zero-setup" to "low-barrier" adoption (§1).
+
+**v0.6** — Consent token structure, session lifecycle phases, feedback authentication.
 
 ## Status
 
