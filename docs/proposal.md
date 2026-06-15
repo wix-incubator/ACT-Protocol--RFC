@@ -166,7 +166,7 @@ where the protected header includes alg and kid, and the signature is computed o
 | preferences | Object | Key-value pairs of user desires (e.g., style, brand, urgency). |
 | constraints | Object | Hard requirements that must be met (e.g., allergies, size, budget). |
 | payload | Object | **Schema.org** compatible object, representing the constraints and preferences. |
-| consent\_token | String (JWT) | A JWS-signed token certifying the user consented to share the included data categories (see §6.1). |
+| consent\_token | String (JWT) | A JWS-signed token certifying the user consented to share the included data categories and specifying which feedback categories the Local Agent is authorized to return (see §6.1). |
 | feedback\_token | String | A session-scoped token the Local Agent MUST include in all Feedback Loop requests (see §5.3). |
 | identity\_hints | Object | (Optional) SSO hints for seamless authentication when an existing SSO relationship exists (see §6.4). |
 
@@ -224,6 +224,8 @@ Global Agents MAY adjust these values. Use cases vary \-- a quick food order nee
 | Unknown or invalid session ID | `404 Not Found` |
 | Session expired or revoked | `410 Gone` |
 | Invalid or missing feedback token (for feedback POSTs, and for context re-pull GETs after token issuance) | `401 Unauthorized` |
+| Feedback `feedback_category` missing or not in consented `feedback_categories` | `403 Forbidden` |
+| Feedback request exceeds size limits (§5.2) | `413 Payload Too Large` |
 
 **Example (Active phase re-pull):**  
 `GET [act_callback_url]?act_session_id=sess_98765abc`  
@@ -243,6 +245,7 @@ The Local Agent MUST use the `act_callback_url` provided in the initial handoff.
 ```json
 { 
   "act_session_id": "sess_98765abc", 
+  "feedback_category": "order_status",
   "description": "User found the item, but requested size (11W) is currently out of stock.", 
   "action": "engagement", 
   "intent_match": false, 
@@ -257,11 +260,14 @@ The Local Agent MUST use the `act_callback_url` provided in the initial handoff.
 | Field | Type | Description |
 | :---- | :---- | :---- |
 | act\_session\_id | String | The unique ID provided in the initial handoff. |
-| description | String | Natural language summary for the Global Agent to explain the status to the user. |
+| feedback\_category | String | The consent category this feedback event belongs to (e.g., `order_status`, `transaction`, `personal_data`). MUST match a value in the `feedback_categories` claim of the `consent_token` (see §6.1). Required when `description` or `payload` is present. |
+| description | String | Natural language summary for the Global Agent to explain the status to the user. MUST NOT exceed 1024 characters. |
 | action | Enum | `engagement` (user interacting), `conversion` (user completed intent), or `abandonment` (user left without completing intent). |
 | intent\_match | Boolean | **True** if the Global Agent's context was accurate to the site's capability. **False** if the site couldn't fulfill the specific constraints (e.g., "We don't sell size 15"). |
 | close\_session | Boolean | Informs the global agent that the session is terminated from the point of view of the local agent and the global agent can close the session as well |
-| payload | Object | **Schema.org** compatible object, giving more details about the engagement / conversion |
+| payload | Object | **Schema.org** compatible object, giving more details about the engagement / conversion. MUST NOT exceed 16 KB when serialized. |
+
+The Global Agent SHOULD reject feedback requests exceeding these size limits with `413 Payload Too Large`.
 
 ### 5.3 Feedback Authentication
 
@@ -301,6 +307,26 @@ The Local Agent MAY send multiple feedback POSTs during a single session (e.g., 
 
 Similarly, the Local Agent MAY pull context multiple times during the Active phase (e.g., for retries or multi-page architectures). After issuance of feedback\_token, any subsequent context retrieval request MUST include Authorization: Bearer \<feedback\_token\>. The Global Agent returns the same cached response.
 
+### 5.6 Feedback Safety
+
+The feedback channel is an inbound data path from an external system into the Global Agent's processing context. Global Agents MUST treat all feedback fields — including `description` and `payload` — as **untrusted input**.
+
+**Prompt injection mitigation**: The `description` field contains natural language authored by the Local Agent, not by the user. Global Agents MUST NOT inject the raw `description` into the user-facing conversation or the agent's own instruction context. Instead, Global Agents SHOULD:
+
+1. Parse feedback using only the structured fields (`action`, `intent_match`, `close_session`) for state updates and routing decisions.
+2. Extract factual data from `payload` by schema type (e.g., `reservationNumber`, `totalPrice` from a `LodgingReservation`) rather than treating it as free-form input.
+3. Generate user-facing summaries from the extracted structured data, not from the raw `description` text.
+4. If the `description` is surfaced to the user, it MUST be presented as a quoted third-party message (e.g., "The site reported: ..."), clearly distinguished from the Global Agent's own voice, and MUST NOT be interpreted as an instruction.
+
+**Feedback category enforcement**: The `consent_token` includes a `feedback_categories` claim (see §6.1) listing the data categories the user consented to receive back from the Local Agent. The Global Agent MUST enforce these categories:
+
+1. The Local Agent MUST include a `feedback_category` field in each feedback POST declaring which consented category the event belongs to.
+2. The Global Agent MUST reject feedback where `feedback_category` is absent, or is not present in the `feedback_categories` list from the `consent_token`, responding with `403 Forbidden`.
+3. Protocol-level fields (`action`, `intent_match`, `close_session`) are always permitted regardless of `feedback_categories` — they are session signals, not data.
+4. If `feedback_categories` is absent from the `consent_token`, the Global Agent MUST reject any feedback that includes a `description` or `payload`, accepting only protocol-level fields.
+
+**Validation**: Global Agents SHOULD validate that `payload` conforms to a known Schema.org type and discard or quarantine payloads with unrecognized types or structures.
+
 ## 6 Privacy & Consent
 
 ### 6.1 The Consent Orchestrator
@@ -311,7 +337,8 @@ The Global Agent serves as the primary **Consent Orchestrator** for the user jou
 * **Execution**: Before releasing an Intent Package via the callback URL, the Global Agent must ensure appropriate consent.  
   * **Implicit Intent:** General parameters (e.g., "blue sneakers") are consented to by the user's action of clicking the link.  
   * **Explicit Sensitive Data:** For constraints such as medical allergies or precise location, the Global Agent must trigger a UI prompt: *"Share your allergy profile with \[Local Agent\]?"*  
-* **The Token as Certification**: When a Local Agent receives a context response, the `consent_token` serves as cryptographic certification that the Consent Orchestrator has verified the user's permission to share that specific information for that specific session.
+* **Bidirectional consent**: The consent flow covers both directions of data transfer in a single user interaction. The Global Agent obtains consent for sharing user data with the Local Agent (`categories`) and for what data the Local Agent may send back (`feedback_categories`). This avoids a separate consent prompt for the reverse direction while ensuring the user controls what enters their agent's context.
+* **The Token as Certification**: When a Local Agent receives a context response, the `consent_token` serves as cryptographic certification that the Consent Orchestrator has verified the user's permission — both for the data shared and for the categories of feedback the Local Agent is authorized to return.
 
 #### Consent Token Structure
 
@@ -326,6 +353,7 @@ The `consent_token` is a **JWS-signed JWT** issued by the Global Agent. It is no
 | iat             | Number   | Issued-at timestamp (Unix epoch).                                                                                                                                                                                                                   |
 | categories      | String[] | Data categories the user consented to share (e.g., `["dietary", "budget", "accessibility"]`).                                                                                                                                                       |
 | consent\_type   | String   | `implicit` (user clicked the link) or `explicit` (user was prompted).                                                                                                                                                                               |
+| feedback\_categories | String[] | Data categories the Local Agent is authorized to include in feedback responses (e.g., `["order_status", "transaction"]`). See §5.6 for enforcement. Protocol-level fields (`action`, `intent_match`, `close_session`) are always permitted and do not require consent. |
 | aud             | String   | Recipient identifier of the Local Agent (e.g., the normalized origin of the destination site) for which this consent\_token is valid.                                                                                                               |
 | context\_digest | String   | Cryptographic hash of a deterministic canonicalized representation of at least the payload object of the context response. Enables the Local Agent to verify that the consent receipt is cryptographically linked to what was actually transferred. |
 | exp             | Number   | Expiration timestamp (Unix epoch) after which the consent\_token is no longer valid for new data transfers.                                                                                                                                         |
@@ -345,11 +373,22 @@ The `consent_token` is a **JWS-signed JWT** issued by the Global Agent. It is no
   "iat": 1750000000,
   "exp": 1750003600,
   "categories": ["dietary", "budget"],
+  "feedback_categories": ["order_status", "transaction"],
   "consent_type": "explicit",
   "aud": "https://italy-eats.com",
   "context_digest": "uU0o4r9r...<sha256-of-canonical-payload>..."
 }
 ```
+
+**Feedback categories**: The following categories are defined for `feedback_categories`:
+
+| Category | Covers | Example payload fields |
+|:---------|:-------|:----------------------|
+| `order_status` | Action outcomes, confirmation numbers, booking references, availability signals | `reservationNumber`, `orderStatus`, `availability` |
+| `transaction` | Pricing, totals, itemized costs, payment confirmation | `totalPrice`, `priceCurrency`, `discount` |
+| `personal_data` | Name, contact info, account details the Local Agent holds from its own records | `name`, `email`, `loyaltyNumber` |
+
+Implementations MAY define additional categories. The Global Agent SHOULD present `feedback_categories` to the user as part of the consent prompt, e.g.: *"Share your dietary preferences and budget with Italy Eats? Italy Eats may send back order status and pricing to your assistant."*
 
 **Verification**: The Local Agent validates the JWS signature using the Global Agent's public key from `https://[[act_origin]/.well-known/act-jwks.json` (same keys used for context verification in §6.3), verifies that aud matches the Local Agent recipient identifier after normalization, and verifies that context\_digest matches a cryptographic hash computed over the received context response (at least the payload object). Keys can be cached.
 
@@ -482,6 +521,7 @@ In contrast, **ACT** is about **enhancing the human-led browsing experience** by
 
 * **ACT Discovery**: A mechanism for Local Agents to advertise ACT support (e.g., `/.well-known/act.json`) would allow Global Agents to prioritize ACT-enabled sites. Currently, ACT degrades gracefully -- non-ACT sites simply ignore the `act_` parameters, so discovery is not required for the protocol to function.
 
+
 ## 8 Examples
 
 ### Hotel Search
@@ -590,12 +630,16 @@ The `consent_token` decodes to:
   "iss": "api.agent.ai",
   "sub": "paris-442",
   "iat": 1750000000,
+  "exp": 1750003600,
   "categories": ["accessibility", "budget", "lodging"],
-  "consent_type": "explicit"
+  "feedback_categories": ["order_status", "transaction"],
+  "consent_type": "explicit",
+  "aud": "https://hotel-deluxe.com",
+  "context_digest": "a1b2c3d4..."
 }
 ```
 
-The Local Agent verifies the JWT signature against the Global Agent's public key at `https://api.agent.ai/.well-known/act-jwks.json` and stores the token as a compliance receipt. The `consent_type: "explicit"` indicates the user was prompted before sharing accessibility needs.
+The Local Agent verifies the JWT signature against the Global Agent's public key at `https://api.agent.ai/.well-known/act-jwks.json` and stores the token as a compliance receipt. The `consent_type: "explicit"` indicates the user was prompted before sharing accessibility needs. The `feedback_categories` indicate the user consented to receive back order status and transaction details — but not personal data.
 
 ---
 
@@ -613,6 +657,7 @@ Authorization: Bearer ft_hmac_paris442_x7k9
 ```json
 {
   "act_session_id": "paris-442",
+  "feedback_category": "transaction",
   "action": "conversion",
   "intent_match": true,
   "description": "User successfully booked the Eiffel Tower Suite for June 12-15.",
@@ -622,14 +667,12 @@ Authorization: Bearer ft_hmac_paris442_x7k9
     "reservationNumber": "FR-77821",
     "reservationStatus": "https://schema.org/Confirmed",
     "totalPrice": "1750.00",
-    "priceCurrency": "USD",
-    "underName": {
-      "@type": "Person",
-      "name": "User Name"
-    }
+    "priceCurrency": "USD"
   }
 }
 ```
+
+Note: The original `underName` (user's name) is omitted because `personal_data` is not in the consented `feedback_categories`. The Local Agent includes `feedback_category: "transaction"`, which matches a value in the consent token's `feedback_categories` claim.
 
 ---
 
