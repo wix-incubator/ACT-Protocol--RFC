@@ -1,4 +1,4 @@
-# Agent Context Transfer (ACT) Protocol v0.6
+# Agent Context Transfer (ACT) Protocol v0.7
 
 ## 1 Introduction
 
@@ -50,19 +50,46 @@ When a Global Agent directs a user to a website, it appends a minimal set of par
 
 3. The Local Agent MAY apply a strict referrer policy on the initial landing response (e.g., to avoid propagating a URL containing act\_ parameters to third-party resources).
 
-### 3.1 URL Parameter Scrubbing and Clean-URL Redirect (Recommended)
+### 3.1 URL Parameter Scrubbing and Clean-URL Redirect
 
-Because `act_session_id` and related act\_ parameters can function as bearer-like session secrets, a Local Agent SHOULD prevent act\_ parameters from persisting in (i) browser address bars and history, (ii) referrer headers, (iii) application logs and analytics, and (iv) customer support screenshots.
+Because `act_session_id` and related act\_ parameters function as bearer-like session secrets, a Local Agent MUST prevent act\_ parameters from persisting in (i) browser address bars and history, (ii) referrer headers, (iii) application logs and analytics, and (iv) customer support screenshots.
 
-**Clean-URL Redirect Flow**: Upon receiving an HTTP request for a destination URL containing one or more act\_-prefixed query parameters, the Local Agent computing system SHOULD:
+**Clean-URL Redirect Flow**: Upon receiving an HTTP request for a destination URL containing one or more act\_-prefixed query parameters, the Local Agent computing system MUST:
 
 1. Extract all act\_-prefixed query parameters (e.g., `act_session_id`, `act_origin`, `act_callback_url`, `act_version`).
 2. Persist extracted parameters only server-side in an ephemeral store (e.g., memory cache or database) keyed by a local, cryptographically random handle (e.g., act\_local\_handle) with a short TTL (e.g., 5 minutes).
 3. Redirect the user client to a second destination URL that omits the act\_-prefixed query parameters, while preserving any non-act\_ query parameters. The Local Agent MAY bind the act\_local\_handle to the user client via a first-party cookie.
 4. Initiate context retrieval independent of the user client (server-to-server) using the stored `act_session_id` and `act_callback_url` as defined in §4. The Local Agent MUST NOT require a client-side POST from the user client to transmit the intent payload.
 
+**Redirect Flow Diagram:**
 
-**Client-side URL scrubbing**: In addition to or instead of an HTTP redirect, a Local Agent MAY remove act\_ parameters from the visible URL after extraction using a history API operation (e.g., replacing the current URL in the address bar without retaining the act\_ parameters).
+```mermaid
+sequenceDiagram
+    participant User
+    participant Browser
+    participant GlobalAgent as Global Agent
+    participant LocalAgent as Local Agent Server
+
+    User->>GlobalAgent: "Find me a quick Italian meal"
+    GlobalAgent->>User: Here are some options:<br>[Italy Eats - Order Now]
+    User->>Browser: Clicks link
+
+    Browser->>LocalAgent: GET /order?item=lasagna&act_session_id=sess_98765abc<br>&act_origin=...&act_callback_url=...
+    Note right of LocalAgent: Extract act_ params,<br>store server-side<br>(ephemeral, short TTL)
+    LocalAgent-->>Browser: 302 Redirect → /order?item=lasagna
+    Note left of Browser: act_ params never<br>persist in address bar,<br>history, or referrer
+    Browser->>LocalAgent: GET /order?item=lasagna
+
+    LocalAgent->>GlobalAgent: GET act_callback_url?act_session_id=sess_98765abc
+    GlobalAgent-->>LocalAgent: 200 OK {context, feedback_token}
+    Note right of LocalAgent: Only Local Agent server<br>holds feedback_token —<br>binds feedback channel<br>to this server
+
+    LocalAgent-->>Browser: Render personalized page
+```
+
+This flow ensures that `act_session_id` appears in exactly one HTTP request from the browser. After the redirect, the act\_ parameters exist only on the Local Agent server. The `feedback_token` returned by the context pull is never exposed to the browser, binding the feedback channel exclusively to the server that performed the context retrieval (see §5.3).
+
+**Client-side URL scrubbing (supplementary)**: As an additional defense, a Local Agent MAY also remove act\_ parameters from the visible URL using a history API operation (e.g., `history.replaceState`). This provides defense-in-depth but does not replace the server-side redirect, which is required.
 
 **Example:**  
 User lands on: `https://italy-eats.com/order?item=lasagna&act_session_id=sess_98765abc&act_origin=https://agent.example&act_callback_url=https://agent.example/v1/act&act_version=1`
@@ -86,7 +113,7 @@ Upon receiving a user via an ACT-enabled link, the Local Agent's server initiate
     4. If any validation fails, the Local Agent SHOULD treat the navigation as a non-ACT visit (i.e., do not perform context pull).
 * **SSRF/callback-substitution mitigation**: Implementations SHOULD reject callback URLs resolving to loopback, link-local, or private network destinations unless explicitly configured.
 * **Authorization**: The `act_session_id` itself serves as the authorization token. The Global Agent validates that it is active and has not expired (see §4.2 Session Lifecycle).
-* **Trust model**: Because this is a server-to-server call, the Global Agent cannot cryptographically verify the caller's identity. The protocol relies on the **unguessable-URL pattern**: session IDs MUST be cryptographically random (minimum 128 bits of entropy) and short-lived, making interception or guessing infeasible. Implementations requiring stronger caller authentication MAY layer on mutual TLS or pre-registered API keys.
+* **Trust model**: Because this is a server-to-server call, the Global Agent cannot cryptographically verify the caller's identity. The protocol relies on the **unguessable-URL pattern**: session IDs MUST be cryptographically random (minimum 128 bits of entropy) and short-lived, making interception or guessing infeasible. Combined with the mandatory server-side redirect (§3.1), the `act_session_id` appears in exactly one browser request and is immediately stripped. The remaining observation vectors (HTTPS-inspecting corporate proxies, browser extensions with `webRequest` permissions) require privileged access to the user's TLS-terminated traffic — an endpoint-compromise threat model that ACT, like OAuth and other URL-token protocols, considers out of scope. Furthermore, the first-pull binding mechanism (see below) ensures that even if a session ID is observed, the `feedback_token` — which gates both re-pulls and feedback submission — is held exclusively by the server that performed the initial context retrieval. Implementations requiring stronger caller authentication MAY layer on mutual TLS or pre-registered API keys.
 * **Elevated Trust Model (optional)**: using Mutual TLS, at which the Local Agent performs the server-to-server HTTPS GET over mutually authenticated TLS (mTLS) by presenting a client certificate, and the Global Agent validates the client certificate according to a configured trust policy. This can be layered in addition to `act_session_id` entropy to reduce replay risk if session identifiers are leaked.
 
 **Implementation Note:**
